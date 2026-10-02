@@ -1,8 +1,0 @@
-langchain>=1.4
-langchain-google-genai
-langgraph
-shiny
-numpy
-opencv-python-headless
-Pillow
-pillow-heif
