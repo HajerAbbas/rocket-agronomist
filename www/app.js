@@ -26,6 +26,12 @@
       st_auto: "Hold still… capturing", st_still_ok: "Leaf found in photo", st_still_no: "No leaf found in this photo",
       st_denied: "Camera permission denied. Use Upload instead.",
       grp_measure: "Python", grp_agent: "AI agent",
+      upload_another: "Upload another", save_ref: "Save as reference",
+      ref_title: "Reference plant", ref_device: "Saved on this device",
+      ref_none: "No reference yet. Photograph a healthy, well-fertilized plant and tap “Save as reference”. Later photos are compared with it.",
+      ref_remove: "Remove reference", ref_line: "Greenness {d} · saved {t}",
+      ref_confirm: "Remove the saved reference plant?", saving_ref: "Saving reference…",
+      ref_fail: "No leaf found in this photo, so it was not saved as reference.",
     },
     ar: {
       brand: "مساعد الجرجير", tagline: "افحص نيتروجين أوراق الجرجير بكاميرا هاتفك",
@@ -44,6 +50,12 @@
       st_auto: "اثبت… جارٍ الالتقاط", st_still_ok: "تم العثور على ورقة في الصورة", st_still_no: "لا توجد ورقة في هذه الصورة",
       st_denied: "تم رفض إذن الكاميرا. استخدم الرفع.",
       grp_measure: "بايثون", grp_agent: "الوكيل الذكي",
+      upload_another: "رفع صورة أخرى", save_ref: "حفظ كمرجع",
+      ref_title: "النبات المرجعي", ref_device: "محفوظ على هذا الجهاز",
+      ref_none: "لا يوجد مرجع بعد. صوّر نباتًا سليمًا جيد التسميد واضغط «حفظ كمرجع». ستتم مقارنة الصور التالية به.",
+      ref_remove: "حذف المرجع", ref_line: "الاخضرار {d} · حُفظ {t}",
+      ref_confirm: "حذف النبات المرجعي المحفوظ؟", saving_ref: "جارٍ حفظ المرجع…",
+      ref_fail: "لم يتم العثور على ورقة في هذه الصورة، لذلك لم تُحفظ كمرجع.",
     },
   };
   let LANG = "en";
@@ -62,6 +74,7 @@
     document.querySelectorAll(".step-group").forEach((g) => { g.textContent = tr(g.dataset.key); });
     if (window.Shiny && Shiny.setInputValue) Shiny.setInputValue("lang", l);
     renderStatus(lastStatus);
+    renderRef(loadRef());
   }
 
   // ------------------------------------------------------------------ camera
@@ -149,8 +162,10 @@
         audio: false,
       });
     } catch (e) {
-      renderStatus({ key: "st_denied", kind: "bad" });
+      $("cam-still").hidden = true;
+      setState("off");
       $("cam-unsupported").hidden = false;
+      $("cam-unsupported").textContent = tr("st_denied");
       return;
     }
     track = stream.getVideoTracks()[0];
@@ -255,15 +270,56 @@
     startCamera();
   }
 
-  function analyze() {
+  function submit(asReference) {
     if (!stillData || busy) return;
     busy = true;
     $("cam-busy").hidden = false;
-    $("cam-analyze").disabled = true;
-    Shiny.setInputValue("photo_submit", { data: stillData, ts: Date.now() }, { priority: "event" });
-    if (window.matchMedia("(max-width: 900px)").matches) {
+    $("cam-busy").querySelector("span:last-child").textContent = tr(asReference ? "saving_ref" : "analyzing");
+    ["cam-analyze", "cam-save-ref"].forEach((id) => { $(id).disabled = true; });
+    Shiny.setInputValue("photo_submit",
+      { data: stillData, as_reference: !!asReference, ts: Date.now() }, { priority: "event" });
+    if (!asReference && window.matchMedia("(max-width: 900px)").matches) {
       setTimeout(() => document.querySelector(".results").scrollIntoView({ behavior: "smooth" }), 150);
     }
+  }
+  const analyze = () => submit(false);
+  const saveAsReference = () => submit(true);
+
+  // ------------------------------------------------------------------ reference (browser storage)
+  const REF_KEY = "rocket_reference_v1";
+
+  function loadRef() {
+    try { return JSON.parse(localStorage.getItem(REF_KEY) || "null"); } catch (e) { return null; }
+  }
+
+  function storeRef(ref) {
+    try {
+      if (ref) localStorage.setItem(REF_KEY, JSON.stringify(ref));
+      else localStorage.removeItem(REF_KEY);
+    } catch (e) { /* storage full or blocked: keep it for this visit only */ }
+  }
+
+  function renderRef(ref) {
+    const panel = $("ref-panel");
+    if (!panel) return;
+    panel.dataset.has = ref ? "1" : "0";
+    if (!ref) return;
+    $("ref-thumb").src = "data:image/jpeg;base64," + ref.thumb;
+    const when = new Date(ref.saved_at).toLocaleString(LANG === "ar" ? "ar" : "en",
+      { dateStyle: "medium", timeStyle: "short" });
+    $("ref-line").textContent = tr("ref_line")
+      .replace("{d}", Number(ref.features.dgci).toFixed(3)).replace("{t}", when);
+  }
+
+  function sendRefToServer(ref) {
+    if (window.Shiny && Shiny.setInputValue) {
+      Shiny.setInputValue("stored_reference", ref ? { features: ref.features } : null, { priority: "event" });
+    }
+  }
+
+  function removeRef() {
+    if (!window.confirm(tr("ref_confirm"))) return;
+    storeRef(null); renderRef(null); sendRefToServer(null);
   }
 
   // ------------------------------------------------------------------ steps
@@ -309,6 +365,10 @@
     $("cam-file").addEventListener("change", (e) => { fromFile(e.target.files[0]); e.target.value = ""; });
     $("cam-retake").addEventListener("click", retake);
     $("cam-analyze").addEventListener("click", analyze);
+    $("cam-save-ref").addEventListener("click", saveAsReference);
+    $("cam-file2").addEventListener("change", (e) => { fromFile(e.target.files[0]); e.target.value = ""; });
+    $("ref-remove").addEventListener("click", removeRef);
+    renderRef(loadRef());
     document.querySelectorAll(".lang-btn").forEach((b) =>
       b.addEventListener("click", () => applyLang(b.dataset.lang)));
 
@@ -340,7 +400,12 @@
   else wire();
 
   // Shiny fires its events through jQuery, so listen with jQuery
-  window.jQuery(document).on("shiny:connected", () => applyLang(LANG));
+  // sessioninitialized fires after Shiny's init handshake; sending "event"
+  // inputs earlier (on shiny:connected) makes the server close the session.
+  window.jQuery(document).on("shiny:sessioninitialized", () => {
+    applyLang(LANG);
+    sendRefToServer(loadRef());     // survives reloads: the browser keeps it
+  });
 
   if (window.Shiny) {
     Shiny.addCustomMessageHandler("steps_reset", (msg) => {
@@ -351,7 +416,16 @@
     Shiny.addCustomMessageHandler("analysis_done", (_msg) => {
       busy = false;
       $("cam-busy").hidden = true;
-      $("cam-analyze").disabled = false;
+      ["cam-analyze", "cam-save-ref"].forEach((id) => { $(id).disabled = false; });
+    });
+    Shiny.addCustomMessageHandler("reference_saved", (msg) => {
+      const ref = { features: msg.features, thumb: msg.thumb, saved_at: Date.now() };
+      storeRef(ref); renderRef(ref);
+      const panel = $("ref-panel");
+      panel.classList.remove("just-saved"); void panel.offsetWidth; panel.classList.add("just-saved");
+    });
+    Shiny.addCustomMessageHandler("reference_failed", (_msg) => {
+      renderStatus({ key: "ref_fail", kind: "bad" });
     });
   }
 })();
