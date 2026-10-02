@@ -19,7 +19,7 @@ from shiny import App, reactive, render, ui
 
 import rocket_agent as ra
 from explain import T as XT, STATUS_WORD, measurement_reasoning, measurement_steps, suff_key
-from leaf_core import analyze_bytes, reference_features_from_bytes
+from leaf_core import _preview_jpeg_b64, analyze_bytes, decode_image, reference_features_from_bytes
 
 WWW = Path(__file__).parent / "www"
 DGCI_MIN, DGCI_MAX = 0.30, 0.75
@@ -41,7 +41,7 @@ TXT = {
         "leaf_area": "Leaf area", "sharpness": "Sharpness", "glare": "Glare", "ok": "OK",
         "blurry": "Blurry", "n_label": "Nitrogen", "cal_needed": "Needs calibration",
         "tap": "Tap the photo to switch between the original and the detected leaf.",
-        "ref_hint": "Now take a photo of the plant you want to check.",
+        "ref_hint": "Saved on this device. Now take or upload a photo of the plant you want to check.",
         "empty": "Take a photo of one rocket leaf to start. The steps and the reasoning will appear here.",
         "tips": "Tips", "retake_tips": {
             "no_leaf_detected": "Point the camera at a single rocket leaf.",
@@ -69,7 +69,7 @@ TXT = {
         "leaf_area": "مساحة الورقة", "sharpness": "الوضوح", "glare": "الانعكاس", "ok": "جيد",
         "blurry": "غير واضح", "n_label": "النيتروجين", "cal_needed": "يحتاج معايرة",
         "tap": "اضغط على الصورة للتبديل بين الأصلية والورقة المكتشفة.",
-        "ref_hint": "الآن التقط صورة للنبات الذي تريد فحصه.",
+        "ref_hint": "تم الحفظ على هذا الجهاز. الآن التقط أو ارفع صورة للنبات الذي تريد فحصه.",
         "empty": "التقط صورة لورقة جرجير واحدة للبدء. ستظهر الخطوات والتفسير هنا.",
         "tips": "نصائح", "retake_tips": {
             "no_leaf_detected": "وجّه الكاميرا نحو ورقة جرجير واحدة.",
@@ -115,11 +115,30 @@ CAMERA_HTML = f"""
     <label class="btn-icon" id="cam-upload-label">{ICON_UPLOAD}<span data-i18n="upload">Upload</span>
       <input type="file" id="cam-file" accept="image/*" hidden></label>
   </div>
-  <div class="cam-controls cam-still-controls">
-    <button type="button" class="btn-ghost" id="cam-retake" data-i18n="retake">Retake</button>
-    <button type="button" class="btn-primary" id="cam-analyze" data-i18n="analyze">Analyze leaf</button>
+  <div class="cam-still-controls">
+    <button type="button" class="btn-primary btn-wide" id="cam-analyze" data-i18n="analyze">Analyze leaf</button>
+    <div class="still-row">
+      <button type="button" class="btn-ghost" id="cam-retake" data-i18n="retake">Retake</button>
+      <label class="btn-ghost" id="cam-upload2-label"><span data-i18n="upload_another">Upload another</span>
+        <input type="file" id="cam-file2" accept="image/*" hidden></label>
+      <button type="button" class="btn-ghost btn-ref" id="cam-save-ref" data-i18n="save_ref">Save as reference</button>
+    </div>
   </div>
   <label class="auto"><input type="checkbox" id="cam-auto"> <span data-i18n="auto">Auto-capture when the leaf is steady</span></label>
+</div>
+"""
+
+REF_PANEL_HTML = """
+<div id="ref-panel" class="ref-panel" data-has="0">
+  <div class="ref-head"><h3 data-i18n="ref_title">Reference plant</h3>
+    <span class="ref-device" data-i18n="ref_device">Saved on this device</span></div>
+  <div class="ref-empty"><p data-i18n="ref_none">No reference yet. Photograph a healthy, well-fertilized
+    plant and tap “Save as reference”. Later photos are compared with it.</p></div>
+  <div class="ref-saved">
+    <img id="ref-thumb" alt="">
+    <div class="ref-info"><p class="ref-line" id="ref-line"></p>
+      <button type="button" class="btn-link" id="ref-remove" data-i18n="ref_remove">Remove reference</button></div>
+  </div>
 </div>
 """
 
@@ -150,13 +169,11 @@ app_ui = ui.page_fluid(
             ui.h2(ui.span("1", class_="num"), ui.span("Take a photo", **{"data-i18n": "s1"})),
             ui.HTML(CAMERA_HTML),
             ui.div(
-                ui.input_switch("is_reference", ui.span("This is my healthy reference plant",
-                                                        **{"data-i18n": "is_ref"}), False),
                 ui.input_text("note", None, placeholder="Optional note, e.g. older leaves look yellow",
                               width="100%"),
                 class_="options",
             ),
-            ui.output_ui("ref_badge"),
+            ui.HTML(REF_PANEL_HTML),
             class_="panel capture",
         ),
         # ---------------- column 2: results ----------------
@@ -255,7 +272,7 @@ def server(input, output, session):
         L = lang()
         xt = XT[L]
         data = base64.b64decode(payload["data"].split(",", 1)[-1])
-        is_ref = bool(input.is_reference())
+        is_ref = bool(payload.get("as_reference"))
         agent_job.cancel()
         agent_wanted.set(False)
 
@@ -273,12 +290,16 @@ def server(input, output, session):
                 if (r.get("leaf_detection") or {}).get("leaf_detected") else None
             if feats:
                 ra.set_reference(tid, feats)
+                thumb = await asyncio.to_thread(lambda: _preview_jpeg_b64(decode_image(data), 240))
+                await session.send_custom_message("reference_saved", {
+                    "features": {k: v for k, v in feats.items() if isinstance(v, (int, float))},
+                    "thumb": thumb})
                 await emit(dict(id="ref", group="measure", status="done", label=xt["step_ref"],
                                 detail=xt["ref_saved"].format(d=f"{feats['dgci']:.3f}")))
             else:
                 await emit(dict(id="ref", group="measure", status="error", label=xt["step_ref"],
                                 detail=xt["ref_failed"]))
-            ui.update_switch("is_reference", value=False)
+                await session.send_custom_message("reference_failed", {})
             current.set({"analysis": r, "image_id": None, "kind": "reference", "saved": bool(feats)})
         else:
             image_id = ra.STORE.add_photo(tid, data, r)
@@ -293,16 +314,22 @@ def server(input, output, session):
         await session.send_custom_message("analysis_done", {"decision": r.get("decision")})
 
     # ---------------- outputs ----------------
-    @render.ui
-    def ref_badge():
-        current()
-        ref = ra.get_reference(tid)
-        if not ref:
-            return None
-        L = lang()
-        return ui.div(ui.span("✓"), ui.span(
-            (f"نبات مرجعي محفوظ (الاخضرار {ref['dgci']:.3f})" if L == "ar"
-             else f"Reference plant saved (greenness {ref['dgci']:.3f})")), class_="ref-badge")
+    @reactive.effect
+    @reactive.event(input.stored_reference, ignore_none=False)
+    def _restore_reference():
+        """The browser keeps the reference (localStorage) and sends it on every page load."""
+        try:
+            payload = input.stored_reference()
+        except Exception:  # noqa: BLE001
+            payload = None
+        feats = (payload or {}).get("features") if isinstance(payload, dict) else None
+        clean = None
+        if isinstance(feats, dict):
+            clean = {k: float(v) for k, v in feats.items()
+                     if isinstance(v, (int, float)) and abs(float(v)) < 1e6}
+            if not (0.0 < clean.get("dgci", -1) < 1.5):
+                clean = None
+        ra.set_reference(tid, clean)
 
     @render.ui
     def measurement():
