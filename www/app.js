@@ -66,7 +66,7 @@
 
   // ------------------------------------------------------------------ camera
   const $ = (id) => document.getElementById(id);
-  let stream = null, track = null, facing = "environment", torchOn = false;
+  let stream = null, track = null, facing = "environment", torchOn = false, torchWanted = false;
   let loopTimer = null, prevGray = null, readySince = 0, lastStatus = null, busy = false;
   const sample = document.createElement("canvas");
   sample.width = 160; sample.height = 120;
@@ -160,6 +160,7 @@
     const caps = track.getCapabilities ? track.getCapabilities() : {};
     $("cam-flash").hidden = !caps.torch;
     torchOn = false; $("cam-flash").classList.remove("is-on");
+    if (torchWanted && caps.torch) await setTorch(true);
     $("cam-capture").disabled = false;
     setState("live");
     prevGray = null;
@@ -169,16 +170,28 @@
   function stopCamera() {
     if (loopTimer) clearInterval(loopTimer);
     loopTimer = null;
+    // Some phones keep the torch lit while the track lives, so turn it off
+    // explicitly first, then stop the track (stopping releases the torch too).
+    if (track && torchOn) {
+      try { track.applyConstraints({ advanced: [{ torch: false }] }); } catch (e) { /* ignore */ }
+    }
+    torchOn = false;
+    $("cam-flash").classList.remove("is-on");
     if (stream) stream.getTracks().forEach((t) => t.stop());
+    const v = $("cam-video"); if (v) v.srcObject = null;
     stream = null; track = null;
   }
 
-  async function toggleTorch() {
+  async function setTorch(on) {
     if (!track) return;
-    torchOn = !torchOn;
-    try { await track.applyConstraints({ advanced: [{ torch: torchOn }] }); }
+    try { await track.applyConstraints({ advanced: [{ torch: on }] }); torchOn = on; }
     catch (e) { torchOn = false; }
     $("cam-flash").classList.toggle("is-on", torchOn);
+  }
+
+  async function toggleTorch() {
+    await setTorch(!torchOn);
+    torchWanted = torchOn;          // remembered for the next photo
   }
 
   let stillData = null;
@@ -205,8 +218,7 @@
     const c = document.createElement("canvas");
     c.width = Math.round(v.videoWidth * scale); c.height = Math.round(v.videoHeight * scale);
     c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
-    if (loopTimer) clearInterval(loopTimer);
-    loopTimer = null;
+    stopCamera();                   // releases the camera, so the flash goes off
     $("cam").classList.add("flash-anim");
     setTimeout(() => $("cam").classList.remove("flash-anim"), 300);
     showStill(c.toDataURL("image/jpeg", 0.92));
@@ -240,8 +252,7 @@
   function retake() {
     $("cam-still").hidden = true;
     stillData = null;
-    if (stream) { setState("live"); prevGray = null; loopTimer = setInterval(loop, 250); }
-    else startCamera();
+    startCamera();
   }
 
   function analyze() {
@@ -312,6 +323,18 @@
       }
     });
   }
+
+  let resumeOnShow = false;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      resumeOnShow = $("cam").dataset.state === "live";
+      stopCamera();
+    } else if (resumeOnShow) {
+      resumeOnShow = false;
+      startCamera();
+    }
+  });
+  window.addEventListener("pagehide", stopCamera);
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wire);
   else wire();
