@@ -17,11 +17,14 @@ from pathlib import Path
 
 from shiny import App, reactive, render, ui
 
+import quota
 import rocket_agent as ra
+from builtin_reference import BUILTIN, apply_builtin
 from explain import T as XT, STATUS_WORD, measurement_reasoning, measurement_steps, suff_key
 from leaf_core import _preview_jpeg_b64, analyze_bytes, decode_image, reference_features_from_bytes
 
 WWW = Path(__file__).parent / "www"
+BUILTIN.start_background_build()          # no-op if reference_builtin.json is shipped
 DGCI_MIN, DGCI_MAX = 0.30, 0.75
 
 TXT = {
@@ -31,11 +34,26 @@ TXT = {
         "agent_wait": "The agent is reviewing the photo, the measurement and the weather…",
         "agent_off": "AI agent is offline ({why}). The measurement above still works.",
         "agent_err": "The AI agent could not finish ({err}). The measurement above is still valid.",
+        "q_day": "Daily free AI limit reached. It resets in {t} (midnight US Pacific time). The measurement above still works.",
+        "q_min": "The AI is busy (free-tier per-minute limit). Try again in about {t}.",
+        "q_retry": "Ask the AI again",
+        "q_line": "AI usage ({m}): {rm}/{rpm} this minute, {rd}/{rpd} today",
+        "q_line_out": "AI daily limit reached ({m}), resets in {t}",
+        "q_spare": "; fallback models: {n} requests left today",
+        "b_ready": "No own reference saved, so the built-in reference is used: {n} photos of healthy rocket from Wikimedia Commons (open licences; only colour values are stored). It is less accurate than your own reference.",
+        "b_building": "Preparing the built-in reference from open web photos…",
+        "b_none": "No reference yet. Photograph a healthy, well-fertilized plant and tap “Save as reference”.",
+        "b_failed": "Built-in reference unavailable ({d}).",
+        "b_sources": "Photo sources ({n})",
+        "hue_title": "Leaf colour compared with healthy rocket photos",
+        "hue_band": "Healthy photos (middle 80%)",
+        "yellower": "Yellower", "deeper": "Deeper green",
         "why": "Why", "next": "Next steps", "conf": "Confidence",
         "conf_v": {"high": "High", "medium": "Medium", "low": "Low"},
         "safety": {"dose": "Check any amount with your agronomist or the product label.",
                    "low_confidence": "Confidence is low: re-check before fertilizing.",
-                   "retake_ignored": "The measurement asked for a retake; treat this advice with caution."},
+                   "retake_ignored": "The measurement asked for a retake; treat this advice with caution.",
+                   "confidence_capped": "Confidence lowered to match the measurement it is based on."},
         "greenness": "Leaf greenness", "paler": "Paler", "darker": "Darker green",
         "you": "This leaf", "ref": "Reference",
         "leaf_area": "Leaf area", "sharpness": "Sharpness", "glare": "Glare", "ok": "OK",
@@ -59,11 +77,26 @@ TXT = {
         "agent_wait": "الوكيل يراجع الصورة والقياس والطقس…",
         "agent_off": "الوكيل الذكي غير متصل ({why}). القياس أعلاه يعمل.",
         "agent_err": "تعذّر على الوكيل الإكمال ({err}). القياس أعلاه ما زال صالحًا.",
+        "q_day": "تم الوصول إلى الحد اليومي المجاني للذكاء الاصطناعي. يتجدد بعد {t} (منتصف الليل بتوقيت المحيط الهادئ الأمريكي). القياس أعلاه ما زال يعمل.",
+        "q_min": "الذكاء الاصطناعي مشغول (حد الدقيقة في الخطة المجانية). أعد المحاولة بعد حوالي {t}.",
+        "q_retry": "اسأل الذكاء الاصطناعي مرة أخرى",
+        "q_line": "استخدام الذكاء الاصطناعي ({m}): {rm}/{rpm} هذه الدقيقة، {rd}/{rpd} اليوم",
+        "q_line_out": "تم بلوغ الحد اليومي ({m})، يتجدد بعد {t}",
+        "q_spare": "؛ النماذج الاحتياطية: {n} طلبًا متبقيًا اليوم",
+        "b_ready": "لا يوجد مرجع خاص بك، لذلك يُستخدم المرجع المدمج: {n} صورة لجرجير سليم من ويكيميديا كومنز (تراخيص مفتوحة؛ تُحفظ قيم الألوان فقط). وهو أقل دقة من مرجعك الخاص.",
+        "b_building": "جارٍ تجهيز المرجع المدمج من صور مفتوحة على الإنترنت…",
+        "b_none": "لا يوجد مرجع بعد. صوّر نباتًا سليمًا جيد التسميد واضغط «حفظ كمرجع».",
+        "b_failed": "المرجع المدمج غير متاح ({d}).",
+        "b_sources": "مصادر الصور ({n})",
+        "hue_title": "لون الورقة مقارنة بصور جرجير سليم",
+        "hue_band": "الصور السليمة (80٪ الوسطى)",
+        "yellower": "أكثر اصفرارًا", "deeper": "أخضر أعمق",
         "why": "لماذا", "next": "الخطوات التالية", "conf": "الثقة",
         "conf_v": {"high": "عالية", "medium": "متوسطة", "low": "منخفضة"},
         "safety": {"dose": "تأكد من أي كمية مع المهندس الزراعي أو ملصق المنتج.",
                    "low_confidence": "الثقة منخفضة: أعد الفحص قبل التسميد.",
-                   "retake_ignored": "القياس طلب إعادة التصوير؛ تعامل مع هذه النصيحة بحذر."},
+                   "retake_ignored": "القياس طلب إعادة التصوير؛ تعامل مع هذه النصيحة بحذر.",
+                   "confidence_capped": "تم خفض الثقة لتطابق القياس الذي بُنيت عليه."},
         "greenness": "درجة اخضرار الورقة", "paler": "أفتح", "darker": "أخضر داكن",
         "you": "هذه الورقة", "ref": "المرجع",
         "leaf_area": "مساحة الورقة", "sharpness": "الوضوح", "glare": "الانعكاس", "ok": "جيد",
@@ -132,8 +165,6 @@ REF_PANEL_HTML = """
 <div id="ref-panel" class="ref-panel" data-has="0">
   <div class="ref-head"><h3 data-i18n="ref_title">Reference plant</h3>
     <span class="ref-device" data-i18n="ref_device">Saved on this device</span></div>
-  <div class="ref-empty"><p data-i18n="ref_none">No reference yet. Photograph a healthy, well-fertilized
-    plant and tap “Save as reference”. Later photos are compared with it.</p></div>
   <div class="ref-saved">
     <img id="ref-thumb" alt="">
     <div class="ref-info"><p class="ref-line" id="ref-line"></p>
@@ -174,6 +205,7 @@ app_ui = ui.page_fluid(
                 class_="options",
             ),
             ui.HTML(REF_PANEL_HTML),
+            ui.output_ui("builtin_info"),
             class_="panel capture",
         ),
         # ---------------- column 2: results ----------------
@@ -187,6 +219,7 @@ app_ui = ui.page_fluid(
             ),
             ui.output_ui("measurement"),
             ui.output_ui("agent_report"),
+            ui.output_ui("quota_line"),
             ui.h2(ui.span("3", class_="num"), ui.span("Ask a follow-up", **{"data-i18n": "s3"}),
                   class_="h2-chat"),
             ui.chat_ui("chat", greeting=TXT["en"]["greet"] + "\n\n" + TXT["ar"]["greet"],
@@ -207,17 +240,33 @@ app_ui = ui.page_fluid(
 # =============================================================================
 # Rendering helpers
 # =============================================================================
-def _gauge(dgci, ref_dgci, t):
+def _gauge(value, vmin, vmax, title, ends, marks=(), band=None, band_label=""):
+    """marks: [(value, label, css_class)], band: (lo, hi)"""
     def pos(v):
-        return max(0.0, min(100.0, (v - DGCI_MIN) / (DGCI_MAX - DGCI_MIN) * 100))
-    marks = [ui.div(ui.span(t["you"], class_="mark-label"), class_="mark mark-you",
-                    style=f"inset-inline-start:{pos(dgci):.1f}%")]
-    if ref_dgci is not None:
-        marks.append(ui.div(ui.span(t["ref"], class_="mark-label"), class_="mark mark-ref",
-                            style=f"inset-inline-start:{pos(ref_dgci):.1f}%"))
-    return ui.div(ui.h4(t["greenness"]), ui.div(ui.div(class_="track"), *marks, class_="gauge"),
-                  ui.div(ui.span(t["paler"]), ui.span(t["darker"]), class_="gauge-ends"),
+        return max(0.0, min(100.0, (v - vmin) / (vmax - vmin) * 100))
+    items = [ui.div(ui.span(lbl, class_="mark-label"), class_=f"mark {cls}",
+                    style=f"inset-inline-start:{pos(v):.1f}%") for v, lbl, cls in marks]
+    if band:
+        a, b = pos(band[0]), pos(band[1])
+        items.insert(0, ui.div(ui.span(band_label, class_="band-label"), class_="band",
+                               style=f"inset-inline-start:{a:.1f}%;width:{max(b - a, 1):.1f}%"))
+    return ui.div(ui.h4(title), ui.div(ui.div(class_="track"), *items, class_="gauge"),
+                  ui.div(ui.span(ends[0]), ui.span(ends[1]), class_="gauge-ends"),
                   class_="gauge-block")
+
+
+def _colour_gauge(n, f, ref, t):
+    b = n.get("builtin")
+    if n.get("mode") == "builtin_reference" and b:
+        return _gauge(b["leaf_hue"], 100, 150, t["hue_title"], (t["yellower"], t["deeper"]),
+                      marks=[(b["leaf_hue"], t["you"], "mark-you")],
+                      band=(b["p10"], b["p90"]), band_label=t["hue_band"])
+    if f.get("dgci") is None:
+        return None
+    marks = [(f["dgci"], t["you"], "mark-you")]
+    if ref:
+        marks.append((ref["dgci"], t["ref"], "mark-ref"))
+    return _gauge(f["dgci"], DGCI_MIN, DGCI_MAX, t["greenness"], (t["paler"], t["darker"]), marks)
 
 
 def _chip(label, value, kind=""):
@@ -259,8 +308,8 @@ def server(input, output, session):
         await session.send_custom_message("step", ev)
 
     @reactive.extended_task
-    async def agent_job(image_id: str, note: str, lang_: str):
-        return await ra.run_turn(tid, note or "Please check this leaf.", lang_, image_id, emit)
+    async def agent_job(image_id: str, note: str, lang_: str, ref_source: str):
+        return await ra.run_turn(tid, note or "Please check this leaf.", lang_, image_id, emit, ref_source)
 
     # ---------------- photo submitted from the camera component -------------
     @reactive.effect
@@ -282,6 +331,11 @@ def server(input, output, session):
 
         ref = ra.get_reference(tid)
         r = await asyncio.to_thread(analyze_bytes, data, True, None if is_ref else ref)
+        ref_source = "own" if ref else "none"
+        if not is_ref and not ref and BUILTIN.get():
+            apply_builtin(r, BUILTIN.get())
+            if (r.get("nitrogen") or {}).get("mode") == "builtin_reference":
+                ref_source = "builtin"
         for ev in measurement_steps(r, L):
             await emit(ev)
 
@@ -303,11 +357,12 @@ def server(input, output, session):
             current.set({"analysis": r, "image_id": None, "kind": "reference", "saved": bool(feats)})
         else:
             image_id = ra.STORE.add_photo(tid, data, r)
-            current.set({"analysis": r, "image_id": image_id, "kind": "leaf", "ref": ref})
+            current.set({"analysis": r, "image_id": image_id, "kind": "leaf", "ref": ref,
+                         "ref_source": ref_source})
             ok, why = ra.agent_status()
             if ok:
                 agent_wanted.set(True)
-                agent_job.invoke(image_id, input.note(), L)
+                agent_job.invoke(image_id, input.note(), L, ref_source)
             else:
                 await emit(dict(id="think", group="agent", status="skip",
                                 label="AI agent" if L == "en" else "الوكيل الذكي", detail=why))
@@ -367,6 +422,10 @@ def server(input, output, session):
         nq = n.get("quality", {})
         if n.get("mode") == "calibrated" and n.get("nitrogen"):
             n_val, n_kind = f"{n['nitrogen']['value']:.2f}%", ""
+        elif n.get("mode") == "builtin_reference" and n.get("builtin"):
+            k = n["builtin"]["status"]
+            n_val = STATUS_WORD[L][k]
+            n_kind = {"below_healthy": "bad", "borderline": "warn"}.get(k, "ok")
         elif n.get("sufficiency"):
             k = suff_key(n["sufficiency"]["status"])
             n_val = STATUS_WORD[L][k]
@@ -382,7 +441,7 @@ def server(input, output, session):
                 _chip(t["glare"], f"{nq.get('glare_fraction', 0) * 100:.1f}%"),
                 _chip(t["n_label"], n_val, n_kind),
                 class_="chips"),
-            _gauge(f["dgci"], ref["dgci"] if ref else None, t) if f.get("dgci") is not None else None,
+            _colour_gauge(n, f, ref, t),
             _shot(r, t),
             ui.tags.details(ui.tags.summary(t["why_measure"]),
                             ui.tags.ol(*[ui.tags.li(x) for x in measurement_reasoning(r, ref, L)],
@@ -413,6 +472,15 @@ def server(input, output, session):
             return None
         res = agent_job.result()
         rep = res.get("report")
+        if res.get("error") == "quota":
+            q = res.get("quota") or {}
+            if q.get("kind") == "day":
+                msg = t["q_day"].format(t=quota.human_wait(q.get("reset_in_s") or 0, L))
+                btn = None
+            else:
+                msg = t["q_min"].format(t=quota.human_wait(q.get("wait_s") or 60, L))
+                btn = ui.input_action_button("retry_agent", t["q_retry"], class_="btn-ghost retry-btn")
+            return ui.div(ui.p(msg), btn, class_="card card-muted quota-card")
         if not rep:
             return ui.div(ui.p(t["agent_err"].format(err=res.get("error") or "no report")),
                           class_="card card-muted")
@@ -433,6 +501,58 @@ def server(input, output, session):
                                                 class_="next-list"), class_="next"),
             *[ui.p("⚠️ " + t["safety"][s], class_="safety") for s in res.get("safety", [])],
             class_="card agent")
+
+    @reactive.effect
+    @reactive.event(input.retry_agent)
+    def _retry_agent():
+        c = current()
+        if c and c.get("image_id"):
+            agent_job.invoke(c["image_id"], input.note(), lang(), c.get("ref_source", "none"))
+
+    @render.ui
+    def quota_line():
+        reactive.invalidate_later(10)
+        agent_job.status()
+        L = lang()
+        ok, _ = ra.agent_status()
+        if not ok:
+            return None
+        stats = ra.quota_status()
+        m = quota.short_name(ra.MODEL)
+        st = stats.get(m)
+        if not st:
+            return None
+        spare = sum(max(0, int(v["rpd"] * quota.SAFETY) - v["rpd_used"])
+                    for k, v in stats.items() if k != m and not v["exhausted"])
+        if st["exhausted"]:
+            txt = TXT[L]["q_line_out"].format(m=m, t=quota.human_wait(st["reset_in_s"], L))
+        else:
+            txt = TXT[L]["q_line"].format(m=m, rm=st["rpm_used"], rpm=st["rpm"],
+                                          rd=st["rpd_used"], rpd=st["rpd"])
+        if spare:
+            txt += TXT[L]["q_spare"].format(n=spare)
+        return ui.p(txt, class_="quota-line")
+
+    @render.ui
+    def builtin_info():
+        L = lang()
+        t = TXT[L]
+        if BUILTIN.state == "building":
+            reactive.invalidate_later(3)
+            return ui.div(ui.span(class_="spinner"), ui.span(t["b_building"]), class_="builtin-info building")
+        d = BUILTIN.get()
+        if d:
+            return ui.div(
+                ui.p(t["b_ready"].format(n=d["n_images"])),
+                ui.tags.details(
+                    ui.tags.summary(t["b_sources"].format(n=len(d["photos"]))),
+                    ui.tags.ul(*[ui.tags.li(ui.tags.a(ph["title"].replace("File:", ""), href=ph["page"],
+                                                      target="_blank", rel="noopener"),
+                                            f" · {ph['license']}" + (f" · {ph['author']}" if ph["author"] else ""))
+                                 for ph in d["photos"]], class_="sources")),
+                class_="builtin-info")
+        extra = [ui.p(t["b_failed"].format(d=BUILTIN.detail), class_="small")] if BUILTIN.state == "failed" else []
+        return ui.div(ui.p(t["b_none"]), *extra, class_="builtin-info")
 
     # ---------------- follow-up chat ----------------
     @chat.on_user_submit
